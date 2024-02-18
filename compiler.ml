@@ -371,55 +371,30 @@ module Reader : READER = struct
     let nt_vector = caten nt1 (caten nt2 (caten nt_elements (char ')'))) in
     pack nt_vector (fun (_, (_, (elements, _))) -> ScmVector(elements)) str
 
-  and nt_proper_list str = 
-    let nt_sexp = caten (char '(') (caten nt_skip_star (char ')')) in
-    let nt_sexp = pack nt_sexp (fun _ -> ScmNil) in
-    let nt2 = caten (char '(') (caten (plus (make_skipped_star nt_sexpr)) (char ')')) in
-    let nt2 = pack nt2 (fun (car, (cadr, cddr)) -> List.fold_right (fun curr acc -> ScmPair(curr, acc)) cadr ScmNil) in
-    let nt_sexpr = disj nt_sexp nt2 in
-    nt_sexpr str
-  
-  and nt_improper_list str =
-    let nt1 = char '(' in
-    let nt1 = caten nt1 (plus (make_skipped_star nt_sexpr)) in
-    let nt1 = pack nt1 (fun (car, cdr) -> cdr) in
-    let nt1 = caten nt1 (char '.') in
-    let nt1 = pack nt1 (fun (car, cdr) -> car) in
-    let nt1 = caten nt1 (make_skipped_star nt_sexpr) in
-    let nt1 = pack nt1 (fun (car, cdr) -> List.fold_right (fun curr acc -> ScmPair(curr, acc)) car cdr) in
-    let nt1 = caten nt1 (char ')') in
-    let nt1 = pack nt1 (fun (car, cdr) -> car) in
-    nt1 str
-
+  (* This function parses either a proper or improper list from a string *)
   and nt_list str =
-    (* we'll start with a proper list, which is a list of sexprs
-       separated by whitespace and comments *)
-    (* let nt_proper_list str = 
-      let nt_serxprs = star nt_sexpr in
-      let nt_proper = caten(char '(') (caten nt_serxprs (char ')')) in
-      pack nt_proper (fun (_, (sexprs, _)) -> 
-        List.fold_right (fun sexpr acc -> ScmPair(sexpr, acc)) sexprs ScmNil) str in
+    (* Parsing a proper list: a list of sexprs enclosed in parentheses *)
+    let nt_proper_list str = 
+      let nt_empty_list = pack (caten (char '(') (caten nt_skip_star (char ')'))) (fun _ -> ScmNil) in
+      let nt_non_empty_list = 
+        pack 
+          (caten (char '(') (caten (plus (make_skipped_star nt_sexpr)) (char ')')))
+          (fun (_, (sexprs, _)) -> List.fold_right (fun curr acc -> ScmPair(curr, acc)) sexprs ScmNil) 
+      in
+      disj nt_empty_list nt_non_empty_list str 
+    in
 
-        (* now the improper list, which is a list of sexprs separated by
-           whitespace and comments, and ends with a dot and a sexpr *)
+    (* Parsing an improper list: sexprs ending with a dot and a final sexpr *)
     let nt_improper_list str =
-      let nt_sexprs = plus nt_sexpr in
-      let nt_last_sexpr = nt_sexpr in
-      let nt_improper = 
-        caten (char '(')
-          (caten nt_sexprs
-            (caten (char '.')
-              (caten nt_skip_star 
-                (caten nt_last_sexprs (char ')'))))) in
-        pack nt_improper (fun (_, (sexprs, (_, (last, _)))) ->
-          let rec build_list = function 
-          | [] -> ScmNil (*base case: Return an empty list representation *) 
-          | sexpr :: sexprs -> ScmPair(sexpr, build_list sexprs) in
-          let proper_part = build_list sexprs in
-          ScmPair(proper_part, last)) str in
-
- *)
-          (* because a list can be a proper list or improper list but not both we will use disjoint. *)
+      let nt_start = caten (char '(') (plus (make_skipped_star nt_sexpr)) in
+      let nt_dot_sexpr = caten (char '.') (make_skipped_star nt_sexpr) in
+      let nt_end = char ')' in
+      let nt_full = caten (caten nt_start nt_dot_sexpr) nt_end in
+      pack nt_full (fun (((_, sexprs), (_, last_sexpr)), _) -> 
+                      List.fold_right (fun curr acc -> ScmPair(curr, acc)) sexprs last_sexpr)
+      str 
+    in
+    (* A list is either a proper or an improper list, but not both *)
     disj nt_proper_list nt_improper_list str
 
   and make_quoted_form nt_qf qf_name =
@@ -568,6 +543,23 @@ module Tag_Parser : TAG_PARSER = struct
     ["and"; "begin"; "cond"; "do"; "else"; "if"; "lambda";
      "let"; "let*"; "letrec"; "or"; "quasiquote"; "quote";
      "set!"; "unquote"; "unquote-splicing"];;
+     
+  let rec list_to_proper_list = 
+    function
+    | [] -> ScmNil
+    | car :: [] -> ScmPair(car, ScmNil)
+    | car :: cdr -> ScmPair(car, list_to_proper_list cdr);;
+
+  let rec scm_append scheme_list sexpr = 
+    match scheme_list with
+    | ScmNil -> sexpr
+    | ScmPair(car, cdr) -> ScmPair(car, scm_append cdr sexpr)
+    | _ -> raise (X_this_should_not_happen "append expects a proper list");;
+
+  let rec scm_list_to_list = function
+     | ScmPair(car, cdr) -> car :: (scm_list_to_list cdr)
+     | ScmNil -> []
+     | _ -> raise (X_this_should_not_happen "list->list expects a proper list");;
 
   let rec scheme_list_to_ocaml = function
     | ScmPair(car, cdr) ->
@@ -634,18 +626,67 @@ module Tag_Parser : TAG_PARSER = struct
                                   ScmPair (ScmBoolean false,
                                            ScmNil))));;
 
+  let beginnify = function
+    | ScmNil -> ScmVoid
+    | ScmPair (e, ScmNil) -> e
+    | es -> ScmPair (ScmSymbol "begin", es);;
+    
+    
   let rec macro_expand_cond_ribs = function
     | ScmNil -> ScmVoid  (* Base case: no more ribs *)
-    | ScmPair (ScmPair (ScmSymbol "else", seq), _) ->
+    | ScmPair (ScmPair (ScmSymbol "else", seq), ScmNil) ->
         (* Handle the else clause *)
-        ScmPair (ScmSymbol "begin", seq)
+        beginnify seq
+    | ScmPair
+    (ScmPair
+      (expr,
+       ScmPair (ScmSymbol "=>", ScmPair (expr_f, ScmNil))),
+     ribs) -> 
+        (* Handle the => clause *)
+        let rest = macro_expand_cond_ribs ribs in
+          ScmPair
+        (ScmSymbol "let",
+         ScmPair
+          (ScmPair
+            (ScmPair (ScmSymbol "e", ScmPair (expr, ScmNil)),
+             ScmPair
+              (ScmPair
+                (ScmSymbol "dit",
+                 ScmPair
+                  (ScmPair
+                    (ScmSymbol "lambda",
+                     ScmPair (ScmNil, ScmPair (expr_f, ScmNil))),
+                   ScmNil)),
+               ScmPair
+                (ScmPair
+                  (ScmSymbol "dif",
+                   ScmPair
+                    (ScmPair
+                      (ScmSymbol "lambda",
+                       ScmPair (ScmNil, ScmPair (rest, ScmNil))),
+                     ScmNil)),
+                 ScmNil))),
+           ScmPair
+            (ScmPair
+              (ScmSymbol "if",
+               ScmPair
+                (ScmSymbol "e",
+                 ScmPair
+                  (ScmPair
+                    (ScmPair (ScmSymbol "dit", ScmNil),
+                     ScmPair (ScmSymbol "e", ScmNil)),
+                   ScmPair (ScmPair (ScmSymbol "dif", ScmNil), ScmNil)))),
+             ScmNil)))
     | ScmPair (ScmPair (test, seq), rest) ->
-        (* Standard clause: convert to if *)
-        ScmPair (ScmSymbol "if",
-                ScmPair (test,
-                          ScmPair (ScmPair (ScmSymbol "begin", seq),
-                                  ScmPair (macro_expand_cond_ribs rest, ScmNil))))
-    | _ -> raise (X_syntax "invalid cond-rib structure")
+    (* Standard clause: convert to if *)
+      let dit = beginnify seq in
+      let dif = macro_expand_cond_ribs rest in
+    ScmPair (ScmSymbol "if",
+            ScmPair (test,
+                      ScmPair (dit,
+                                ScmPair (dif,
+                                        ScmNil))))
+    | _ -> raise (X_syntax "malform cond-ribs")
                                          
 
   let is_list_of_unique_names =
@@ -773,12 +814,17 @@ module Tag_Parser : TAG_PARSER = struct
                                               ScmPair (ribs, exprs)),
                                      ScmNil))))
     | ScmPair (ScmSymbol "letrec", ScmPair (ribs, exprs)) ->
-       tag_parse
-         (ScmPair (ScmSymbol "let",
-                   ScmPair (ribs,
-                            ScmPair (ScmPair (ScmSymbol "letrec",
-                                              ScmPair (ScmNil, exprs)),
-                                     ScmNil))))
+      let ribsList = scm_list_to_list ribs in
+      let ribs_list_of_pairs = List.map (fun rib -> scm_list_to_list rib) ribsList in
+      let make_set_expression var  sexpr_= ScmPair(ScmSymbol "set!", ScmPair(var, ScmPair(sexpr_, ScmNil))) in
+      let set_expression_list = List.map (fun rib -> make_set_expression (List.hd rib) (List.hd (List.tl rib))) ribs_list_of_pairs in
+      let set_expression = list_to_proper_list set_expression_list in
+      let set_body = scm_append set_expression exprs in 
+      let new_ribs_list = List.map (fun rib_list_ -> [List.hd rib_list_;
+                          ScmPair(ScmSymbol "quote", ScmPair(ScmSymbol "_", ScmNil))]) ribs_list_of_pairs in
+      let new_ribs = List.map list_to_proper_list new_ribs_list in
+      let new_ribs = list_to_proper_list new_ribs in
+      tag_parse (ScmPair(ScmSymbol "let", ScmPair(new_ribs, set_body)))
     | ScmPair (ScmSymbol "and", ScmNil) -> tag_parse (ScmBoolean true)
     | ScmPair (ScmSymbol "and", exprs) ->
        (match (scheme_list_to_ocaml exprs) with
@@ -978,11 +1024,74 @@ module Semantic_Analysis : SEMANTIC_ANALYSIS = struct
 
   (* run this first *)
   let annotate_lexical_address pe =
-    raise (X_not_yet_implemented "hw 2")
+    let rec run expr params env =
+      match expr with
+      | ScmConst sexpr -> ScmConst' sexpr
+      | ScmVarGet (Var name) -> ScmVarGet' (tag_lexical_address_for_var name params env)
+      | ScmIf (test, dit, dif) ->
+         let test = run test params env in
+         let dit = run dit params env in
+         let dif = run dif params env in
+         ScmIf' (test, dit, dif)
+      | ScmSeq exprs ->
+         ScmSeq' (List.map (fun expr -> run expr params env) exprs)
+      | ScmOr exprs ->
+         ScmOr' (List.map (fun expr -> run expr params env) exprs)
+      | ScmVarSet (Var name, expr) ->
+         let expr = run expr params env in
+         ScmVarSet' (tag_lexical_address_for_var name params env, expr)
+      | ScmVarDef (Var name, expr) ->
+         let expr = run expr params env in
+         ScmVarDef' (tag_lexical_address_for_var name params env, expr)
+      | ScmLambda (params', kind, expr) ->
+         let params' = params' @
+                       (match kind with
+                        | Simple -> []
+                        | Opt opt -> [opt]) in
+         let expr = run expr params' (params :: env) in
+         ScmLambda' (params', kind, expr)
+      | ScmApplic (proc, args) ->
+         let proc = run proc params env in
+         let args = List.map (fun arg -> run arg params env) args in
+         ScmApplic' (proc, args, Non_Tail_Call)
+    in run pe [] [];;
 
   (* run this second *)
   let annotate_tail_calls pe = 
-    raise (X_not_yet_implemented "hw 2");;
+    let rec run expr tail =
+      match expr with
+      | ScmConst' _ -> expr
+      | ScmVarGet' _ -> expr
+      | ScmIf' (test, dit, dif) ->
+         let test = run test false in
+         let dit = run dit tail in
+         let dif = run dif tail in
+         ScmIf' (test, dit, dif)
+      | ScmSeq' exprs ->
+         let rec run' = function
+           | [] -> []
+           | [expr] -> [run expr tail]
+           | expr :: rest -> (run expr false) :: (run' rest)
+         in ScmSeq' (run' exprs)
+      | ScmOr' exprs ->
+         let rec run' = function
+           | [] -> []
+           | [expr] -> [run expr tail]
+           | expr :: rest -> (run expr false) :: (run' rest)
+         in ScmOr' (run' exprs)
+      | ScmVarSet' _ -> expr
+      | ScmVarDef' _ -> expr
+      | ScmBox' _ -> expr
+      | ScmBoxGet' _ -> expr
+      | ScmBoxSet' _ -> expr
+      | ScmLambda' (params, kind, expr) ->
+         let expr = run expr true in
+         ScmLambda' (params, kind, expr)
+      | ScmApplic' (proc, args, app_kind) ->
+         let proc = run proc false in
+         let args = List.map (fun arg -> run arg false) args in
+         ScmApplic' (proc, args, app_kind)
+    in run pe false;;
 
   (* auto_box *)
 
