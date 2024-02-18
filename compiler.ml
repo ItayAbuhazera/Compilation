@@ -371,10 +371,30 @@ module Reader : READER = struct
     let nt_vector = caten nt1 (caten nt2 (caten nt_elements (char ')'))) in
     pack nt_vector (fun (_, (_, (elements, _))) -> ScmVector(elements)) str
 
+  and nt_proper_list str = 
+    let nt_sexp = caten (char '(') (caten nt_skip_star (char ')')) in
+    let nt_sexp = pack nt_sexp (fun _ -> ScmNil) in
+    let nt2 = caten (char '(') (caten (plus (make_skipped_star nt_sexpr)) (char ')')) in
+    let nt2 = pack nt2 (fun (car, (cadr, cddr)) -> List.fold_right (fun curr acc -> ScmPair(curr, acc)) cadr ScmNil) in
+    let nt_sexpr = disj nt_sexp nt2 in
+    nt_sexpr str
+  
+  and nt_improper_list str =
+    let nt1 = char '(' in
+    let nt1 = caten nt1 (plus (make_skipped_star nt_sexpr)) in
+    let nt1 = pack nt1 (fun (car, cdr) -> cdr) in
+    let nt1 = caten nt1 (char '.') in
+    let nt1 = pack nt1 (fun (car, cdr) -> car) in
+    let nt1 = caten nt1 (make_skipped_star nt_sexpr) in
+    let nt1 = pack nt1 (fun (car, cdr) -> List.fold_right (fun curr acc -> ScmPair(curr, acc)) car cdr) in
+    let nt1 = caten nt1 (char ')') in
+    let nt1 = pack nt1 (fun (car, cdr) -> car) in
+    nt1 str
+
   and nt_list str =
     (* we'll start with a proper list, which is a list of sexprs
        separated by whitespace and comments *)
-    let nt_proper_list str = 
+    (* let nt_proper_list str = 
       let nt_serxprs = star nt_sexpr in
       let nt_proper = caten(char '(') (caten nt_serxprs (char ')')) in
       pack nt_proper (fun (_, (sexprs, _)) -> 
@@ -384,18 +404,22 @@ module Reader : READER = struct
            whitespace and comments, and ends with a dot and a sexpr *)
     let nt_improper_list str =
       let nt_sexprs = plus nt_sexpr in
+      let nt_last_sexpr = nt_sexpr in
       let nt_improper = 
         caten (char '(')
-        (caten nt_sexprs
-        (caten (char '.')
-        (caten nt_sexprs (char ')')))) in
+          (caten nt_sexprs
+            (caten (char '.')
+              (caten nt_skip_star 
+                (caten nt_last_sexprs (char ')'))))) in
         pack nt_improper (fun (_, (sexprs, (_, (last, _)))) ->
           let rec build_list = function 
           | [] -> ScmNil (*base case: Return an empty list representation *) 
           | sexpr :: sexprs -> ScmPair(sexpr, build_list sexprs) in
-          build_list sexprs) str in
+          let proper_part = build_list sexprs in
+          ScmPair(proper_part, last)) str in
 
-          (*because a list can be a proper list or improper list but not both we will use disjoint.*)
+ *)
+          (* because a list can be a proper list or improper list but not both we will use disjoint. *)
     disj nt_proper_list nt_improper_list str
 
   and make_quoted_form nt_qf qf_name =
@@ -585,9 +609,9 @@ module Tag_Parser : TAG_PARSER = struct
        ScmPair (ScmSymbol "append",
                 ScmPair (car, ScmPair (cdr, ScmNil)))
     | ScmPair (car, cdr) ->
-        let car = macro_expand_qq car in
-        let cdr = macro_expand_qq cdr in
-        ScmPair (ScmSymbol "cons", ScmPair (car, ScmPair (cdr, ScmNil)))
+        let excar = macro_expand_qq car in
+        let excdr = macro_expand_qq cdr in
+        ScmPair (excar, excdr)
     | ScmVector sexprs ->
        if (list_contains_unquote_splicing sexprs)
        then let sexpr = macro_expand_qq
@@ -749,7 +773,12 @@ module Tag_Parser : TAG_PARSER = struct
                                               ScmPair (ribs, exprs)),
                                      ScmNil))))
     | ScmPair (ScmSymbol "letrec", ScmPair (ribs, exprs)) ->
-       raise (X_not_yet_implemented "hw 1")
+       tag_parse
+         (ScmPair (ScmSymbol "let",
+                   ScmPair (ribs,
+                            ScmPair (ScmPair (ScmSymbol "letrec",
+                                              ScmPair (ScmNil, exprs)),
+                                     ScmNil))))
     | ScmPair (ScmSymbol "and", ScmNil) -> tag_parse (ScmBoolean true)
     | ScmPair (ScmSymbol "and", exprs) ->
        (match (scheme_list_to_ocaml exprs) with
