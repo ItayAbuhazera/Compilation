@@ -4,6 +4,7 @@
  * Programmer: Mayer Goldberg, 2024
  *)
 
+(* open Pc;; *)
 #use "pc.ml";;
 
 exception X_not_yet_implemented of string;;
@@ -994,7 +995,14 @@ module type SEMANTIC_ANALYSIS = sig
 end;; (* end of signature SEMANTIC_ANALYSIS *)
 
 module Semantic_Analysis : SEMANTIC_ANALYSIS = struct
-
+(* Separates the last element from the rest of a list. *)
+  let rec split_last_element lst =
+    match lst with
+    | [] -> raise (Invalid_argument "Empty list") (* Handling empty list case explicitly *)
+    | [x] -> ([], x)
+    | x :: xs ->
+      let (rest, last) = split_last_element xs in
+      (x :: rest, last)
   let rec lookup_in_rib name = function
     | [] -> None
     | name' :: rib ->
@@ -1058,39 +1066,41 @@ module Semantic_Analysis : SEMANTIC_ANALYSIS = struct
 
   (* run this second *)
   let annotate_tail_calls pe = 
-    let rec run expr tail =
-      match expr with
-      | ScmConst' _ -> expr
-      | ScmVarGet' _ -> expr
+    let rec run pe tail =
+      match pe with
       | ScmIf' (test, dit, dif) ->
          let test = run test false in
          let dit = run dit tail in
          let dif = run dif tail in
          ScmIf' (test, dit, dif)
       | ScmSeq' exprs ->
-         let rec run' = function
-           | [] -> []
-           | [expr] -> [run expr tail]
-           | expr :: rest -> (run expr false) :: (run' rest)
-         in ScmSeq' (run' exprs)
-      | ScmOr' exprs ->
-         let rec run' = function
-           | [] -> []
-           | [expr] -> [run expr tail]
-           | expr :: rest -> (run expr false) :: (run' rest)
-         in ScmOr' (run' exprs)
-      | ScmVarSet' _ -> expr
-      | ScmVarDef' _ -> expr
-      | ScmBox' _ -> expr
-      | ScmBoxGet' _ -> expr
-      | ScmBoxSet' _ -> expr
-      | ScmLambda' (params, kind, expr) ->
-         let expr = run expr true in
-         ScmLambda' (params, kind, expr)
+         if (not tail)
+          then ScmSeq' (List.map (fun expr -> run expr tail) exprs)
+        else
+          let pair = split_last_element exprs in
+          let app p = (match p with
+            | (exprs, last) -> List.append (List.map (fun last -> run last false) exprs)  [run last true]) in
+          let nexprs = app pair in
+          ScmSeq' nexprs
+      | ScmOr' exprs -> if (not tail)
+        then ScmOr' (List.map (fun expr -> run expr tail) exprs)
+        else
+          let pair = split_last_element exprs in
+          let app p = (match p with
+            | (exprs, last) -> List.append (List.map (fun last -> run last true) exprs)  [run last true]) in
+          let nexprs = app pair in
+          ScmOr' nexprs
+      | ScmLambda' (params, kind, pe) ->
+         let pe = run pe true in
+         ScmLambda' (params, kind, pe)
       | ScmApplic' (proc, args, app_kind) ->
-         let proc = run proc false in
-         let args = List.map (fun arg -> run arg false) args in
-         ScmApplic' (proc, args, app_kind)
+         if (tail)
+          then ScmApplic' (run proc false, List.map (fun arg -> run arg false) args, Tail_Call)
+        else
+          ScmApplic' (run proc false, List.map (fun arg -> run arg false) args, Non_Tail_Call)
+      | ScmVarSet' (var, expr) -> ScmVarSet' (var, run expr false)
+      | ScmVarDef' (var, expr) -> ScmVarDef' (var, run expr false)
+      | _ -> pe
     in run pe false;;
 
   (* auto_box *)
@@ -1718,10 +1728,39 @@ module Code_Generation : CODE_GENERATION = struct
     fun table ->
     Printf.sprintf "%s:\n%s"
       label_start_of_constants_table (run table);;
+  let rec collect_free_vars_each_ast ast = 
+    match ast with
+    | ScmVarGet' (Var' (v, Free)) -> [v]
+    | ScmVarGet' _ | ScmBox' _ | ScmBoxGet' _ -> []
+    | ScmConst' _ -> []
+    | ScmIf' (test, dit, dif) -> 
+       (collect_free_vars_each_ast test) @
+         (collect_free_vars_each_ast dit) @
+         (collect_free_vars_each_ast dif)
+    | ScmSeq' exprs' ->
+        List.fold_left
+          (fun vars expr' -> vars @ (collect_free_vars_each_ast expr'))
+          [] exprs'
+    | ScmOr' exprs' ->
+        List.fold_left
+          (fun vars expr' -> vars @ (collect_free_vars_each_ast expr'))
+          [] exprs'
+    | ScmVarSet' (Var' (v, Free), expr') -> v :: (collect_free_vars_each_ast expr')
+    | ScmVarSet' (_, expr') | ScmVarDef' (_, expr') | ScmBoxSet' (_, expr') | ScmLambda' (_, _, expr') -> collect_free_vars_each_ast expr'
+    | ScmApplic' (expr', exprs', _) -> (collect_free_vars_each_ast expr') @ (List.fold_left (fun vars expr' -> vars @ (collect_free_vars_each_ast expr')) [] exprs');;
+
+
+  
 
   let collect_free_vars pe =
-    raise (X_not_yet_implemented "final project");;
+    (* the function should find all the free variabls in the AST's and collect them as list*)
+    let rec run = function
+      | [] -> []
+      | expr' :: exprs' -> (collect_free_vars_each_ast expr') @ (run exprs')
+    in remove_duplicates (run pe);;
 
+    
+    (*raise (X_not_yet_implemented "collect_free_vars");;*)
   let make_free_vars_table =
     let rec run index = function
       | [] -> []
@@ -1838,7 +1877,17 @@ module Code_Generation : CODE_GENERATION = struct
          ^ (Printf.sprintf
               "\tmov rax, qword [rax + 8 * %d]\t; bound var %s\n" minor v)
       | ScmIf' (test, dit, dif) ->
-         raise (X_not_yet_implemented "final project")
+        let label_else = make_if_else () in
+        let label_end = make_if_end () in
+        (run params env test)
+        ^ "\tcmp rax, sob_boolean_false\n"
+        ^ (Printf.sprintf "\tje %s\n" label_else)
+        ^ (run params env dit)
+        ^ (Printf.sprintf "\tjmp %s\n" label_end)
+        ^ (Printf.sprintf "%s:\n" label_else)
+        ^ (run params env dif)
+        ^ (Printf.sprintf "%s:\n" label_end)
+        (* raise (X_not_yet_implemented "final project") *)
       | ScmSeq' exprs' ->
          String.concat "\n"
            (List.map (run params env) exprs')

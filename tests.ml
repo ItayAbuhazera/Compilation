@@ -3,13 +3,18 @@
 (* Assuming Compiler and PC modules are in compiler.ml and pc.ml respectively *)
 #use "compiler.ml";;
 #use "pc.ml";;
+(* open Compiler;; *)
+open Reader;;
+open Tag_Parser;;
+open Printf;;
+open Semantic_Analysis;;
 (* test_nt_vector: unit -> unit *)
 (* Tests the nt_vector nonterminal *)
 (* Prints "Test passed" for each successful test *)
 (* Prints "Test failed (No match)" for each failed test *)
 (* Prints "Test failed (Error occurred)" for each test that raised an error *)
 (* Itay: We should add more tests fot the nt_list and more *)
-let test_nt_vector () =
+(* let test_nt_vector () =
   let test_cases = [
     "#(1 2 3)"; 
     "#(a b c)"; 
@@ -25,7 +30,7 @@ let test_nt_vector () =
   ] in
   List.iter (fun test_case ->
     try
-      let result = (Reader.nt_sexpr test_case 0).found in
+      let result = (read test_case 0).found in
       Printf.printf "Test passed: %s -> %s\n" test_case (string_of_sexpr result)
     with
     | PC.X_no_match -> Printf.printf "Test failed (No match): %s\n" test_case
@@ -52,14 +57,14 @@ let test_nt_proper_list () =
     with
     | PC.X_no_match -> Printf.printf "Test failed (No match): %s\n" test_case
     | _ -> Printf.printf "Test failed (Error occurred): %s\n" test_case
-  ) test_cases;;
+  ) test_cases;; *)
 (* test_nt_list: unit -> unit *)
 (* Tests the nt_list nonterminal *)
 (* Prints "Test passed" for each successful test *)
 (* Prints "Test failed (No match)" for each failed test *)
 (* Prints "Test failed (Error occurred)" for each test that raised an error *)
 (* Itay: We should add more tests fot the nt_list and more *)
-let test_nt_improper_list () =
+(* let test_nt_improper_list () =
   let test_cases = [
     "(1 . 2)"; 
     "(a . b)"; 
@@ -79,7 +84,7 @@ let test_nt_improper_list () =
     with
     | PC.X_no_match -> Printf.printf "Test failed (No match): %s\n" test_case
     | _ -> Printf.printf "Test failed (Error occurred): %s\n" test_case
-  ) test_cases;;
+  ) test_cases;; *)
 (* test_nt_list: unit -> unit *)
 (* Tests the nt_list nonterminal *)
 (* Prints "Test passed" for each successful test *)
@@ -95,7 +100,7 @@ exception X_syntax of string;;
 (* Prints "Test failed (Error occurred)" for each test that raised an error *)
 (* test_macro_expand_cond: unit -> unit *)
 (* Tests the transformation of cond expressions *)
-let test_macro_expand_cond () =
+(* let test_macro_expand_cond () =
   let test_cases = [
     (* Test case format: (cond expression, expected transformed expression) *)
     ("(cond ((> 3 2) 'greater) (else 'equal))", "(if (> 3 2) 'greater 'equal)");
@@ -143,12 +148,32 @@ let test_read () =
     with
     | X_syntax msg -> Printf.printf "Test raised X_syntax: %s - %s\n" input_expr msg
     | e -> Printf.printf "Test raised an unknown exception: %s - %s\n" input_expr (Printexc.to_string e)
+  ) test_cases;; *)
+
+let test_tail_call_anntotate () =
+  let test_cases = [
+    (* Test case format: (input
+        expression, expected transformed sexpression) *)
+        ("(define (f x) (if (= x 0) 1 (* x (f (- x 1)))))");
+  ] in
+  List.iter (fun (input_expr) ->
+    try
+      let sexpr = read input_expr in
+      let parsed_expr = tag_parse sexpr in
+      let annotated_lexicaly = annotate_lexical_address parsed_expr in
+      let annotated_tail = annotate_tail_calls annotated_lexicaly in
+      printf "this is the annotated tail: %s\n" (string_of_expr' annotated_tail);
+    with
+    | X_syntax msg -> printf "Test raised X_syntax: %s - %s\n" input_expr msg
+    | e -> printf "Test raised an unknown exception: %s - %s\n" input_expr (Printexc.to_string e)
   ) test_cases;;
+
 
 let () =
   (* test_nt_vector (); *)
   (* test_nt_proper_list (); *)
   (* test_nt_improper_list (); *)
-  test_read();
+  (* test_read(); *)
   (* test_macro_expand_cond (); *)
   (* Add more test function calls as needed *)
+  test_tail_call_anntotate ();;

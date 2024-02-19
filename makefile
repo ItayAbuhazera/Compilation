@@ -1,18 +1,22 @@
-OCAMLC=ocamlc # compiler
-OCAMLFLAGS=-g # flags
+# Variables
+OCAMLC=ocamlc
+OCAMLFLAGS=-g
+OUTPUT=compiler.byte
 
-all: main
+# Default target
+all: $(OUTPUT)
 
-main: compiler.cmo pc.cmo
-	$(OCAMLC) $(OCAMLFLAGS) -o main pc.cmo compiler.cmo
+# Linking
+$(OUTPUT): pc.cmo compiler.cmo
+	$(OCAMLC) $(OCAMLFLAGS) -o $(OUTPUT) pc.cmo compiler.cmo
 
+# Compilation
 pc.cmo: pc.ml
 	$(OCAMLC) $(OCAMLFLAGS) -c pc.ml
 
 compiler.cmo: compiler.ml pc.cmo
 	$(OCAMLC) $(OCAMLFLAGS) -c compiler.ml
 
+# Clean
 clean:
-	rm -f *.cmo *.cmi main
-
-.PHONY: all clean
+	rm -f *.cmo *.cmi $(OUTPUT)
