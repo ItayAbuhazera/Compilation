@@ -1880,7 +1880,7 @@ module Code_Generation : CODE_GENERATION = struct
         let label_else = make_if_else () in
         let label_end = make_if_end () in
         (run params env test)
-        ^ "\tcmp rax, sob_boolean_false\n"
+        ^ (Printf.sprintf "\tcmp rax, sob_boolean_false\n")
         ^ (Printf.sprintf "\tje %s\n" label_else)
         ^ (run params env dit)
         ^ (Printf.sprintf "\tjmp %s\n" label_end)
@@ -1913,13 +1913,37 @@ module Code_Generation : CODE_GENERATION = struct
             | None -> run params env (ScmConst' (ScmBoolean false)))
          in asm_code
       | ScmVarSet' (Var' (v, Free), expr') ->
-         raise (X_not_yet_implemented "final project")
+            (run params env expr')
+           (Printf.sprintf "\tmov qword [%s], rax 
+           ; The return of set is void\n" 
+           "mov rax, sob_void\t"
+           ";Setting the value of a free variable %s\n" (search_free_var_table v free_vars) v)
+        (* raise (X_not_yet_implemented "final project") *)
       | ScmVarSet' (Var' (v, Param minor), ScmBox' _) ->
-         raise (X_not_yet_implemented "final project")
+          "\tmov rdi, 8\n"
+          ^ "\tcall malloc\n"
+          ^ (Printf.sprintf "\tmov rbx, PARAM(%d)\n" minor)
+          ^ "\tmov qword [rax], rbx\n"
+          ^ (Printf.sprintf "\tmov PARAM(%d), rax\n" minor)
+          ^ "\tmov rax, sob_void\t"
+          ";Setting the value of a parameter %d\n" minor
+
+         (* raise (X_not_yet_implemented "final project") *)
       | ScmVarSet' (Var' (v, Param minor), expr') ->
-         raise (X_not_yet_implemented "final project")
+        (run params env expr')
+        (Printf.sprintf "\tmov qword [rbp + 8 * %d + 8 * 4], rax\n" minor)
+        ^ "\tmov rax, sob_void\t"
+        ";Setting the value of a parameter %d\n" minor 
+        (* raise (X_not_yet_implemented "final project") *)
       | ScmVarSet' (Var' (v, Bound (major, minor)), expr') ->
-         raise (X_not_yet_implemented "final project")
+        (run params env expr')
+        (Printf.sprintf "\tmov rbx, qword[rbp + 2 * 8]\n")
+        ^ (Printf.sprintf "\tmov rbx, qword[rbx + %d * 8]\n" major)
+        ^ (Printf.sprintf "\tmov qword [rbx + %d * 8], rax\n" minor)
+        ^ "\tmov rax, sob_void\t"
+        ";Setting the value of a bound variable %d %d\n" major minor
+
+         (* raise (X_not_yet_implemented "final project") *)
       | ScmVarDef' (Var' (v, Free), expr') ->
          let label = search_free_var_table v free_vars in
          (run params env expr')
@@ -1935,7 +1959,14 @@ module Code_Generation : CODE_GENERATION = struct
          (run params env (ScmVarGet' var'))
          ^ "\tmov rax, qword [rax]\n"
       | ScmBoxSet' (var', expr') ->
-         raise (X_not_yet_implemented "final project")
+          (run params env expr')
+          "\tpush rax\n"
+          ^ (run params env (ScmVarGet' var'))
+          ^ "\tpop qword [rax]\n"
+          ^ "\tmov rax, sob_void\n"
+          ^ ";Setting the value of a boxed variable\n"
+
+         (* raise (X_not_yet_implemented "final project") *)
       | ScmLambda' (params', Simple, body) ->
          let label_loop_env = make_lambda_simple_loop_env ()
          and label_loop_env_end = make_lambda_simple_loop_env_end ()
@@ -1997,9 +2028,52 @@ module Code_Generation : CODE_GENERATION = struct
          ^ (Printf.sprintf "\tret AND_KILL_FRAME(%d)\n" (List.length params'))
          ^ (Printf.sprintf "%s:\t; new closure is in rax\n" label_end)
       | ScmLambda' (params', Opt opt, body) ->
-         raise (X_not_yet_implemented "final project")
+        let label_loop_env = make_lambda_opt_loop_env ()
+        and label_loop_env_end = make_lambda_opt_loop_env_end () 
+        and label_loop_params = make_lambda_opt_loop_params ()
+        and label_loop_params_end = make_lambda_opt_loop_params_end ()
+        and label_code = make_lambda_opt_code ()
+        and label_end = make_lambda_opt_end ()
+        and label_arity_exact = make_lambda_opt_arity_exact ()
+        and label_arity_more = make_lambda_opt_arity_more ()
+        and label_stack_ok = make_lambda_opt_stack_ok ()
+        and label_loop = make_lambda_opt_loop ()
+        and label_loop_exit = make_lambda_opt_loop_exit ()
+        and label_loop_two = make_lambda_opt_loop ()
+        and label_loop_exit_two = make_lambda_opt_loop_exit ()
+        and label_loop_two_update_stack = make_lambda_opt_loop ()
+        and label_loop_exit_two_update_stack = make_lambda_opt_loop_exit ()
+        in
+        "; Extract Lambda Opt\n"
+        ^ "\tmov rdi, (1 + 2 * 8)\t; sob closure\n"
+        ^ "\tcall malloc\n"
+        ^ "\tpush rax\n"
+        ^ (Printf.sprintf "\tmov rdi, 8 * %d\t; new rib\n" params)
+        ^ "\tcall malloc\n"
+        ^ "\tpush rax\n"
+
+
+         (* raise (X_not_yet_implemented "final project") *)
       | ScmApplic' (proc, args, Non_Tail_Call) -> 
-         raise (X_not_yet_implemented "final project")
+        let args_code =
+          String.concat ""
+            (List.map
+               (fun arg ->
+                 let arg_code = run params env arg in
+                 arg_code
+                 ^ "\tpush rax\n")
+               (List.rev args))
+        and proc_code = run params env proc in
+        "\t; preparing a non-tail-call\n"
+        ^ args_code
+        ^ (Printf.sprintf "\tpush %d\t; arg count\n" (List.length args))
+        ^ proc_code
+        ^ "\tassert_closure(rax)\n"
+        ^ "\tpush SOB_CLOSURE_ENV(rax)\n"
+        ^ "\tcall SOB_CLOSURE_CODE(rax)\n"
+        ^ "; The return of a non-tail-call\n"
+     
+         (*raise (X_not_yet_implemented "final project")*)
       | ScmApplic' (proc, args, Tail_Call) -> 
          let args_code =
            String.concat ""
