@@ -584,38 +584,30 @@ module Tag_Parser : TAG_PARSER = struct
 
   let rec macro_expand_qq = function
     | ScmNil -> ScmPair (ScmSymbol "quote", ScmPair (ScmNil, ScmNil))
-    | (ScmSymbol _) as sexpr ->
-       ScmPair (ScmSymbol "quote", ScmPair (sexpr, ScmNil))
+    | (ScmSymbol _) as sexpr -> ScmPair (ScmSymbol "quote", ScmPair (sexpr, ScmNil))
     | ScmPair (ScmSymbol "unquote", ScmPair (sexpr, ScmNil)) -> sexpr
-    | ScmPair (ScmPair (ScmSymbol "unquote",
-                        ScmPair (car, ScmNil)),
-               cdr) ->
-       let cdr = macro_expand_qq cdr in
-       ScmPair (ScmSymbol "cons", ScmPair (car, ScmPair (cdr, ScmNil)))
-    | ScmPair (ScmPair (ScmSymbol "unquote-splicing",
-                        ScmPair (sexpr, ScmNil)),
-               ScmNil) ->
-       sexpr
-    | ScmPair (ScmPair (ScmSymbol "unquote-splicing",
-                        ScmPair (car, ScmNil)), cdr) ->
-       let cdr = macro_expand_qq cdr in
-       ScmPair (ScmSymbol "append",
-                ScmPair (car, ScmPair (cdr, ScmNil)))
+    | ScmPair (ScmPair (ScmSymbol "unquote-splicing", ScmPair (car, ScmNil)), cdr) ->
+        (* Expand cdr before deciding on the structure *)
+        let expanded_cdr = macro_expand_qq cdr in
+        begin match expanded_cdr with
+        | ScmNil -> car (* If cdr expands to ScmNil, just use car without append *)
+        | _ -> ScmPair (ScmSymbol "append", ScmPair (car, ScmPair (expanded_cdr, ScmNil)))
+        end
     | ScmPair (car, cdr) ->
         let excar = macro_expand_qq car in
         let excdr = macro_expand_qq cdr in
-        ScmPair (excar, excdr)
+        begin match excdr with
+        | ScmNil -> ScmPair (ScmSymbol "cons", ScmPair (excar, ScmNil)) (* Preserve original behavior for empty cdr *)
+        | _ -> ScmPair (ScmSymbol "cons", ScmPair (excar, ScmPair (excdr, ScmNil))) (* Standard cons construction *)
+        end
     | ScmVector sexprs ->
-       if (list_contains_unquote_splicing sexprs)
-       then let sexpr = macro_expand_qq
-                          (scheme_sexpr_list_of_sexpr_list sexprs) in
-            ScmPair (ScmSymbol "list->vector",
-                     ScmPair (sexpr, ScmNil))
-       else let sexprs = 
-              (scheme_sexpr_list_of_sexpr_list
-                 (List.map macro_expand_qq sexprs)) in
-            ScmPair (ScmSymbol "vector", sexprs)
-    | sexpr -> sexpr;;
+        let sexprs_expanded = List.map macro_expand_qq sexprs in
+        ScmPair (ScmSymbol "vector", scheme_sexpr_list_of_sexpr_list sexprs_expanded)
+    | sexpr -> sexpr
+
+  and scheme_sexpr_list_of_sexpr_list sexprs =
+    List.fold_right (fun sexpr acc -> ScmPair (sexpr, acc)) sexprs ScmNil
+
 
   let rec macro_expand_and_clauses expr = function
     | [] -> expr
@@ -1051,17 +1043,19 @@ module Semantic_Analysis : SEMANTIC_ANALYSIS = struct
       | ScmVarDef (Var name, expr) ->
          let expr = run expr params env in
          ScmVarDef' (tag_lexical_address_for_var name params env, expr)
-      | ScmLambda (params', kind, expr) ->
-         let params' = params' @
-                       (match kind with
-                        | Simple -> []
-                        | Opt opt -> [opt]) in
-         let expr = run expr params' (params :: env) in
-         ScmLambda' (params', kind, expr)
+      | ScmLambda (fixed_params, kind, body) ->
+        let params' = 
+          match kind with
+          | Simple -> fixed_params  
+          | Opt opt -> fixed_params @ [opt] 
+        in
+        let env' = params :: env in  (* Extend the environment correctly *)
+        let body' = run body params' env' in  (* Use the updated environment *)
+        ScmLambda' (fixed_params, kind, body')  (* Note: Original fixed_params and kind retained *)
       | ScmApplic (proc, args) ->
-         let proc = run proc params env in
-         let args = List.map (fun arg -> run arg params env) args in
-         ScmApplic' (proc, args, Non_Tail_Call)
+        let proc = run proc params env in
+        let args = List.map (fun arg -> run arg params env) args in
+        ScmApplic' (proc, args, Non_Tail_Call)
     in run pe [] [];;
 
   (* run this second *)
@@ -1913,35 +1907,39 @@ module Code_Generation : CODE_GENERATION = struct
             | None -> run params env (ScmConst' (ScmBoolean false)))
          in asm_code
       | ScmVarSet' (Var' (v, Free), expr') ->
-            (run params env expr')
-           (Printf.sprintf "\tmov qword [%s], rax 
-           ; The return of set is void\n" 
-           "mov rax, sob_void\t"
-           ";Setting the value of a free variable %s\n" (search_free_var_table v free_vars) v)
+          let genExp = run params env expr' in
+          let label = search_free_var_table v free_vars in
+          (Printf.sprintf "\t;Expression for free var %s\n" v)
+          ^ Printf.sprintf "\t%s\n" genExp
+          ^ (Printf.sprintf "\tmov qword [%s], rax\n" label)
+          ^ "\tmov rax, sob_void\n" (* the return from set is void *)
         (* raise (X_not_yet_implemented "final project") *)
       | ScmVarSet' (Var' (v, Param minor), ScmBox' _) ->
-          "\tmov rdi, 8\n"
-          ^ "\tcall malloc\n"
-          ^ (Printf.sprintf "\tmov rbx, PARAM(%d)\n" minor)
-          ^ "\tmov qword [rax], rbx\n"
-          ^ (Printf.sprintf "\tmov PARAM(%d), rax\n" minor)
-          ^ "\tmov rax, sob_void\t"
-          ";Setting the value of a parameter %d\n" minor
+        (* here is the only place to get Scmbox we should extract the expr' from it and then set the value of the variable *)
+          Printf.sprintf "\t mov rdi, 8 \n" (* Allocate 8 bytes for the box *)
+        ^ "\t call malloc ; call malloc (rax will contain the address of the box)\n"
+        ^ Printf.sprintf "\t mov rbx, PARAM(%d)\n" minor (* Load the parameter value into rbx *)
+        ^ "\t ; set rbx <- [param(minor)]\n"
+        ^ "\t mov [rax], rbx ; Store the value of rbx in the allocated box\n"
+        ^ Printf.sprintf "\t mov PARAM(%d), rax ; Update the parameter to point to the new box\n" minor
+        ^ "\t mov rax, sob_void ; Set rax to void to indicate completion\n"
 
          (* raise (X_not_yet_implemented "final project") *)
       | ScmVarSet' (Var' (v, Param minor), expr') ->
-        (run params env expr')
-        (Printf.sprintf "\tmov qword [rbp + 8 * %d + 8 * 4], rax\n" minor)
-        ^ "\tmov rax, sob_void\t"
-        ";Setting the value of a parameter %d\n" minor 
+        let genExp = run params env expr' in
+        (Printf.sprintf "\t;Expression for param %d\n" minor)
+        ^ Printf.sprintf "\t%s\n" genExp
+        ^ (Printf.sprintf "\tmov qword [rbp + 8 * %d + 8 * 4], rax\n" minor)
+        ^ "\tmov rax, sob_void\t" (* the return from set is void *)
         (* raise (X_not_yet_implemented "final project") *)
       | ScmVarSet' (Var' (v, Bound (major, minor)), expr') ->
-        (run params env expr')
-        (Printf.sprintf "\tmov rbx, qword[rbp + 2 * 8]\n")
-        ^ (Printf.sprintf "\tmov rbx, qword[rbx + %d * 8]\n" major)
-        ^ (Printf.sprintf "\tmov qword [rbx + %d * 8], rax\n" minor)
-        ^ "\tmov rax, sob_void\t"
-        ";Setting the value of a bound variable %d %d\n" major minor
+        let genExp = run params env expr' in
+        (Printf.sprintf "\t;Expression for bound %d %d\n" major minor)
+        ^ Printf.sprintf "\t%s\n" genExp
+        ^ "\tmov rax, ENV\n" (* TODO: we should check it if the ENV is a label*)
+        ^ (Printf.sprintf "\tmov rax, qword [rax + 8 * %d]\n" major)
+        ^ (Printf.sprintf "\tmov qword [rax + 8 * %d], rax\n" minor)
+        ^ "\tmov rax, sob_void\t" (* the return from set is void *)
 
          (* raise (X_not_yet_implemented "final project") *)
       | ScmVarDef' (Var' (v, Free), expr') ->
@@ -1959,12 +1957,12 @@ module Code_Generation : CODE_GENERATION = struct
          (run params env (ScmVarGet' var'))
          ^ "\tmov rax, qword [rax]\n"
       | ScmBoxSet' (var', expr') ->
-          (run params env expr')
-          "\tpush rax\n"
+          let genExp = run params env expr' in
+          (Printf.sprintf "\t;Expression for box set\n")
+          ^ Printf.sprintf "\t%s\n" genExp
           ^ (run params env (ScmVarGet' var'))
-          ^ "\tpop qword [rax]\n"
-          ^ "\tmov rax, sob_void\n"
-          ^ ";Setting the value of a boxed variable\n"
+          ^ "\tmov qword [rax], rax\n"
+          ^ "\tmov rax, sob_void\n" (* the return from set is void *)
 
          (* raise (X_not_yet_implemented "final project") *)
       | ScmLambda' (params', Simple, body) ->
